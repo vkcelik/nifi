@@ -177,18 +177,20 @@ public class JMSConnectionFactoryProvider extends AbstractControllerService impl
                 this.setProperty(propertyName, entry.getValue());
             } else {
                 if (propertyName.equals(BROKER)) {
-                    if (context.getProperty(CONNECTION_FACTORY_IMPL).evaluateAttributeExpressions().getValue().startsWith("org.apache.activemq")) {
-                        this.setProperty("brokerURL", entry.getValue());
-                    } else {
+                    String brokerValue = context.getProperty(descriptor).evaluateAttributeExpressions().getValue();
+                    String connectionFactoryValue = context.getProperty(CONNECTION_FACTORY_IMPL).evaluateAttributeExpressions().getValue();
+                    if (connectionFactoryValue.startsWith("org.apache.activemq")) {
+                        this.setProperty("brokerURL", brokerValue);
+                    } else if (connectionFactoryValue.startsWith("com.ibm.mq.jms")){
                         String[] hostPort = entry.getValue().split(":");
                         if (hostPort.length == 2) {
                             this.setProperty("hostName", hostPort[0]);
                             this.setProperty("port", hostPort[1]);
-                        } else if (hostPort.length != 2) {
-                            this.setProperty("serverUrl", entry.getValue()); // for tibco
                         } else {
-                            throw new IllegalArgumentException("Failed to parse broker url: " + entry.getValue());
+                            this.setProperty("connectionNameList", brokerValue);
                         }
+                    } else if (connectionFactoryValue.startsWith("com.tibco.tibjms")) {
+                        this.setProperty("serverUrl", brokerValue);
                     }
                     SSLContextService sc = context.getProperty(SSL_CONTEXT_SERVICE).asControllerService(SSLContextService.class);
                     if (sc != null) {
