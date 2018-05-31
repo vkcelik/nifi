@@ -105,8 +105,8 @@ public class JMSConnectionFactoryProvider extends AbstractControllerService impl
     public static final PropertyDescriptor BROKER_URI = new PropertyDescriptor.Builder()
             .name(BROKER)
             .displayName("Broker URI")
-            .description("URI pointing to the network location of the JMS Message broker. For example, "
-                    + "'tcp://myhost:61616' for ActiveMQ or 'myhost:1414' for IBM MQ")
+            .description("URI pointing to the network location of the JMS Message broker. Example for ActiveMQ: "
+                    + "'tcp://myhost:61616'. Examples for IBM MQ: 'myhost(1414)' and 'myhost01(1414),myhost02(1414)'")
             .addValidator(new NonEmptyBrokerURIValidator())
             .required(true)
             .expressionLanguageSupported(true)
@@ -186,21 +186,24 @@ public class JMSConnectionFactoryProvider extends AbstractControllerService impl
      * service configuration. For example, 'channel' property will correspond to
      * 'setChannel(..) method and 'queueManager' property will correspond to
      * setQueueManager(..) method with a single argument.
-     * <p>
+     *
      * There are also few adjustments to accommodate well known brokers. For
      * example ActiveMQ ConnectionFactory accepts address of the Message Broker
      * in a form of URL while IBMs in the form of host/port pair (more common).
      * So this method will use value retrieved from the 'BROKER_URI' static
      * property 'as is' if ConnectionFactory implementation is coming from
-     * ActiveMQ and for all others (for now) the 'BROKER_URI' value will be
+     * ActiveMQ or Tibco. For all others (for now) the 'BROKER_URI' value will be
      * split on ':' and the resulting pair will be used to execute
      * setHostName(..) and setPort(..) methods on the provided
-     * ConnectionFactory. This may need to be maintained and adjusted to
-     * accommodate other implementation of ConnectionFactory, but only for
-     * URL/Host/Port issue. All other properties are set as dynamic properties
-     * where user essentially provides both property name and value, The bean
-     * convention is also explained in user manual for this component with links
-     * pointing to documentation of various ConnectionFactories.
+     * ConnectionFactory. An exception to this if the ConnectionFactory
+     * implementation is coming from IBM MQ and multiple brokers are listed,
+     * in this case setConnectionNameList(..) method is executed.
+     * This may need to be maintained and adjusted to accommodate other
+     * implementation of ConnectionFactory, but only for URL/Host/Port issue.
+     * All other properties are set as dynamic properties where user essentially
+     * provides both property name and value, The bean convention is also
+     * explained in user manual for this component with links pointing to
+     * documentation of various ConnectionFactories.
      *
      * @see #setProperty(String, String) method
      */
@@ -211,17 +214,20 @@ public class JMSConnectionFactoryProvider extends AbstractControllerService impl
             if (descriptor.isDynamic()) {
                 this.setProperty(propertyName, entry.getValue());
             } else {
-                if (propertyName.equals(BROKER)) {
-                    String brokerValue = context.getProperty(descriptor).evaluateAttributeExpressions().getValue();
-                    if (context.getProperty(CONNECTION_FACTORY_IMPL).evaluateAttributeExpressions().getValue().startsWith("org.apache.activemq")) {
+                if (descriptor == BROKER_URI) {
+                    String brokerValue = context.getProperty(BROKER_URI).evaluateAttributeExpressions().getValue();
+                    String connectionFactoryValue = context.getProperty(CONNECTION_FACTORY_IMPL).evaluateAttributeExpressions().getValue();
+                    if (connectionFactoryValue.startsWith("org.apache.activemq")) {
                         this.setProperty("brokerURL", brokerValue);
+                    } else if (connectionFactoryValue.startsWith("com.tibco.tibjms")) {
+                        this.setProperty("serverUrl", brokerValue);
                     } else {
                         String[] hostPort = brokerValue.split(":");
                         if (hostPort.length == 2) {
                             this.setProperty("hostName", hostPort[0]);
                             this.setProperty("port", hostPort[1]);
-                        } else if (hostPort.length != 2) {
-                            this.setProperty("serverUrl", brokerValue); // for tibco
+                        } else if (connectionFactoryValue.startsWith("com.ibm.mq.jms")){
+                            this.setProperty("connectionNameList", brokerValue);
                         } else {
                             throw new IllegalArgumentException("Failed to parse broker url: " + brokerValue);
                         }
@@ -309,7 +315,6 @@ public class JMSConnectionFactoryProvider extends AbstractControllerService impl
      * evaluation
      */
     static class NonEmptyBrokerURIValidator implements Validator {
-
         @Override
         public ValidationResult validate(String subject, String input, ValidationContext context) {
             String value = input;
@@ -321,7 +326,7 @@ public class JMSConnectionFactoryProvider extends AbstractControllerService impl
     }
 
     /**
-     *
+     * {@link Validator} that ensures that client library path exists and points to a directory
      */
     static class ClientLibValidator implements Validator {
 
