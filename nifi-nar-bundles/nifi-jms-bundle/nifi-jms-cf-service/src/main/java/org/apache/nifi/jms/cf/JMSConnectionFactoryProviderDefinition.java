@@ -63,7 +63,7 @@ public interface JMSConnectionFactoryProviderDefinition extends ControllerServic
             .displayName("Broker URI")
             .description("URI pointing to the network location of the JMS Message broker. Example for ActiveMQ: "
                     + "'tcp://myhost:61616'. Examples for IBM MQ: 'myhost(1414)' and 'myhost01(1414),myhost02(1414)'")
-            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+            .addValidator(new NonEmptyBrokerURIValidator())
             .required(true)
             .expressionLanguageSupported(true)
             .build();
