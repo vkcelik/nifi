@@ -43,7 +43,8 @@
           <li><b>MQ Client Libraries path</b> - Path to the directory with additional resources (i.e., JARs, configuration files etc.) to be added 
 							to the classpath. Such resources typically represent target MQ client libraries for the ConnectionFactory 
 							implementation. It is optional if you are using Apache ActiveMQ since its libraries are distributed with this component.</li>
-          <li><b>Broker URI</b> - URI pointing to the network location of the JMS Message broker. For example, 'tcp://myhost:61616' for ActiveMQ or simply 'myhost:1414'.</li>
+          <li><b>Broker URI</b> - URI pointing to the network location of the JMS Message broker. Example for ActiveMQ: 'tcp://myhost:61616'.
+  		         'Examples for IBM MQ: 'myhost(1414)' and 'myhost01(1414),myhost02(1414)'.</li>
         </ul>
         The rest of the properties are set as Dynamic Properties following <a href="http://docstore.mik.ua/orelly/java-ent/jnut/ch06_02.htm">Java Beans</a> 
         convention where a property name is derived from the <i>set*</i> method of the vendor specific ConnectionFactory's implementation.
