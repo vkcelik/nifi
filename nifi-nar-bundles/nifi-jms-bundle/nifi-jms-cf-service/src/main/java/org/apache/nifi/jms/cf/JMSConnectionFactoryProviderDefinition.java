@@ -61,9 +61,9 @@ public interface JMSConnectionFactoryProviderDefinition extends ControllerServic
     public static final PropertyDescriptor BROKER_URI = new PropertyDescriptor.Builder()
             .name(BROKER)
             .displayName("Broker URI")
-            .description("URI pointing to the network location of the JMS Message broker. For example, "
-                      + "'tcp://myhost:61616' for ActiveMQ or 'myhost:1414' for IBM MQ")
-            .addValidator(new NonEmptyBrokerURIValidator())
+            .description("URI pointing to the network location of the JMS Message broker. Example for ActiveMQ: "
+                    + "'tcp://myhost:61616'. Examples for IBM MQ: 'myhost(1414)' and 'myhost01(1414),myhost02(1414)'")
+            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .required(true)
             .expressionLanguageSupported(true)
             .build();
