@@ -24,6 +24,7 @@ import java.util.Map.Entry;
 
 import javax.net.ssl.SSLContext;
 import java.io.File;
+import java.util.stream.Collectors;
 
 import javax.jms.ConnectionFactory;
 
@@ -209,37 +210,42 @@ public class JMSConnectionFactoryProvider extends AbstractControllerService impl
      * @see #setProperty(String, String) method
      */
     private void setConnectionFactoryProperties(ConfigurationContext context) {
-        for (final Entry<PropertyDescriptor, String> entry : context.getProperties().entrySet()) {
+        if (context.getProperty(BROKER_URI).isSet()) {
+            String brokerValue = context.getProperty(BROKER_URI).evaluateAttributeExpressions().getValue();
+            String connectionFactoryValue = context.getProperty(CONNECTION_FACTORY_IMPL).evaluateAttributeExpressions().getValue();
+            if (connectionFactoryValue.startsWith("org.apache.activemq")) {
+                this.setProperty("brokerURL", brokerValue);
+            } else if (connectionFactoryValue.startsWith("com.tibco.tibjms")) {
+                this.setProperty("serverUrl", brokerValue);
+            } else {
+                // Try to parse broker URI as colon separated host/port pair
+                String[] hostPort = brokerValue.split(":");
+                if (hostPort.length == 2) {
+                    // If broker URI indeed was colon separated host/port pair
+                    this.setProperty("hostName", hostPort[0]);
+                    this.setProperty("port", hostPort[1]);
+                } else if (connectionFactoryValue.startsWith("com.ibm.mq.jms")) {
+                    // Assuming broker is in hostname(port) format
+                    this.setProperty("connectionNameList", brokerValue);
+                }
+            }
+        }
+
+        SSLContextService sc = context.getProperty(SSL_CONTEXT_SERVICE).asControllerService(SSLContextService.class);
+        if (sc != null) {
+            SSLContext ssl = sc.createSSLContext(ClientAuth.NONE);
+            this.setProperty("sSLSocketFactory", ssl.getSocketFactory());
+        }
+
+        List<Entry<PropertyDescriptor, String>> dynamicProperties = context.getProperties().entrySet().stream()
+                .filter(entry -> entry.getKey().isDynamic())
+                .collect(Collectors.toList());
+
+        for (Entry<PropertyDescriptor, String> entry : dynamicProperties) {
             PropertyDescriptor descriptor = entry.getKey();
             String propertyName = descriptor.getName();
-            if (descriptor.isDynamic()) {
-                this.setProperty(propertyName, entry.getValue());
-            } else {
-                if (propertyName.equals(BROKER)) {
-                    String brokerValue = context.getProperty(descriptor).evaluateAttributeExpressions().getValue();
-                    String[] hostPort = brokerValue.split(":");
-                    String connectionFactoryValue = context.getProperty(CONNECTION_FACTORY_IMPL).evaluateAttributeExpressions().getValue();
-                    if (connectionFactoryValue.startsWith("org.apache.activemq")) {
-                        this.setProperty("brokerURL", brokerValue);
-                    } else if (connectionFactoryValue.startsWith("com.tibco.tibjms")) {
-                        this.setProperty("serverUrl", brokerValue);
-                    } else {
-                        if (hostPort.length == 2) {
-                            this.setProperty("hostName", hostPort[0]);
-                            this.setProperty("port", hostPort[1]);
-                        } else if (connectionFactoryValue.startsWith("com.ibm.mq.jms")){
-                            this.setProperty("connectionNameList", brokerValue);
-                        } else {
-                            throw new IllegalArgumentException("Failed to parse broker url: " + brokerValue);
-                        }
-                    }
-                    SSLContextService sc = context.getProperty(SSL_CONTEXT_SERVICE).asControllerService(SSLContextService.class);
-                    if (sc != null) {
-                        SSLContext ssl = sc.createSSLContext(ClientAuth.NONE);
-                        this.setProperty("sSLSocketFactory", ssl.getSocketFactory());
-                    }
-                } // ignore 'else', since it's the only non-dynamic property that is relevant to CF configuration
-            }
+            String propertyValue = context.getProperty(descriptor).evaluateAttributeExpressions().getValue();
+            this.setProperty(propertyName, propertyValue);
         }
     }
 
