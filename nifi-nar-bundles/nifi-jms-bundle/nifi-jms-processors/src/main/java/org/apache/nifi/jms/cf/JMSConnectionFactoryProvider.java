@@ -210,7 +210,7 @@ public class JMSConnectionFactoryProvider extends AbstractControllerService impl
      *
      * @see #setProperty(String, String) method
      */
-    void setConnectionFactoryProperties(ConfigurationContext context) {
+    private void setConnectionFactoryProperties(ConfigurationContext context) {
         if (context.getProperty(BROKER_URI).isSet()) {
             String brokerValue = context.getProperty(BROKER_URI).evaluateAttributeExpressions().getValue();
             String connectionFactoryValue = context.getProperty(CONNECTION_FACTORY_IMPL).evaluateAttributeExpressions().getValue();
@@ -279,7 +279,7 @@ public class JMSConnectionFactoryProvider extends AbstractControllerService impl
      * follow bean convention and all their properties using Java primitives as
      * arguments.
      */
-    void setProperty(String propertyName, Object propertyValue) {
+    private void setProperty(String propertyName, Object propertyValue) {
         String methodName = this.toMethodName(propertyName);
         Method method = Utils.findMethod(methodName, this.connectionFactory.getClass());
         if (method != null) {
