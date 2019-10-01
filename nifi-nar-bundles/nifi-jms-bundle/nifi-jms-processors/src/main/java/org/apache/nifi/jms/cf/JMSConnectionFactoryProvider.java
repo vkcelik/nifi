@@ -18,6 +18,7 @@ package org.apache.nifi.jms.cf;
 
 import java.lang.reflect.Method;
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map.Entry;
@@ -209,7 +210,7 @@ public class JMSConnectionFactoryProvider extends AbstractControllerService impl
      *
      * @see #setProperty(String, String) method
      */
-    private void setConnectionFactoryProperties(ConfigurationContext context) {
+    void setConnectionFactoryProperties(ConfigurationContext context) {
         if (context.getProperty(BROKER_URI).isSet()) {
             String brokerValue = context.getProperty(BROKER_URI).evaluateAttributeExpressions().getValue();
             String connectionFactoryValue = context.getProperty(CONNECTION_FACTORY_IMPL).evaluateAttributeExpressions().getValue();
@@ -218,15 +219,26 @@ public class JMSConnectionFactoryProvider extends AbstractControllerService impl
             } else if (connectionFactoryValue.startsWith("com.tibco.tibjms")) {
                 this.setProperty("serverUrl", brokerValue);
             } else {
-                // Try to parse broker URI as colon separated host/port pair
-                String[] hostPort = brokerValue.split(":");
-                if (hostPort.length == 2) {
-                    // If broker URI indeed was colon separated host/port pair
-                    this.setProperty("hostName", hostPort[0]);
-                    this.setProperty("port", hostPort[1]);
-                } else if (connectionFactoryValue.startsWith("com.ibm.mq.jms")) {
-                    // Assuming broker is in hostname(port) format
-                    this.setProperty("connectionNameList", brokerValue);
+                String[] brokerList = brokerValue.split(",");
+                if (connectionFactoryValue.startsWith("com.ibm.mq.jms")) {
+                    List<String> ibmConList = new ArrayList<String>();
+                    for (String broker : brokerList) {
+                        String[] hostPort = broker.split(":");
+                        if (hostPort.length == 2) {
+                            ibmConList.add(hostPort[0]+"("+hostPort[1]+")");
+                        } else {
+                            ibmConList.add(broker);
+                        }
+                    }
+                    this.setProperty("connectionNameList", String.join(",", ibmConList));
+                } else {
+                    // Try to parse broker URI as colon separated host/port pair. Use first pair if multiple given.
+                    String[] hostPort = brokerList[0].split(":");
+                    if (hostPort.length == 2) {
+                        // If broker URI indeed was colon separated host/port pair
+                        this.setProperty("hostName", hostPort[0]);
+                        this.setProperty("port", hostPort[1]);
+                    }
                 }
             }
         }
@@ -267,7 +279,7 @@ public class JMSConnectionFactoryProvider extends AbstractControllerService impl
      * follow bean convention and all their properties using Java primitives as
      * arguments.
      */
-    private void setProperty(String propertyName, Object propertyValue) {
+    void setProperty(String propertyName, Object propertyValue) {
         String methodName = this.toMethodName(propertyName);
         Method method = Utils.findMethod(methodName, this.connectionFactory.getClass());
         if (method != null) {
