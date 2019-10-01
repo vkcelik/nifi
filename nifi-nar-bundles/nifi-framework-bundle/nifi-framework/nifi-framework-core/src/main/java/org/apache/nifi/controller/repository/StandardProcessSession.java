@@ -25,6 +25,7 @@ import org.apache.nifi.controller.queue.QueueSize;
 import org.apache.nifi.controller.repository.claim.ContentClaim;
 import org.apache.nifi.controller.repository.claim.ContentClaimWriteCache;
 import org.apache.nifi.controller.repository.claim.ResourceClaim;
+import org.apache.nifi.controller.repository.io.ContentClaimInputStream;
 import org.apache.nifi.controller.repository.io.DisableOnCloseInputStream;
 import org.apache.nifi.controller.repository.io.DisableOnCloseOutputStream;
 import org.apache.nifi.controller.repository.io.FlowFileAccessInputStream;
@@ -144,7 +145,7 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
     private long contentSizeIn = 0L, contentSizeOut = 0L;
 
     private ContentClaim currentReadClaim = null;
-    private ByteCountingInputStream currentReadClaimStream = null;
+    private ContentClaimInputStream currentReadClaimStream = null;
     private long processingStartTime;
 
     // List of InputStreams that have been opened by calls to {@link #read(FlowFile)} and not yet closed
@@ -161,7 +162,7 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
     // so that we are able to aggregate many into a single Fork Event.
     private final Map<FlowFile, ProvenanceEventBuilder> forkEventBuilders = new HashMap<>();
 
-    private Checkpoint checkpoint = new Checkpoint();
+    private Checkpoint checkpoint = null;
     private final ContentClaimWriteCache claimCache;
 
     public StandardProcessSession(final RepositoryContext context, final TaskTermination taskTermination) {
@@ -358,47 +359,8 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
             final long updateProvenanceStart = System.nanoTime();
             updateProvenanceRepo(checkpoint);
 
-            final long claimRemovalStart = System.nanoTime();
-            final long updateProvenanceNanos = claimRemovalStart - updateProvenanceStart;
-
-            /**
-             * Figure out which content claims can be released. At this point,
-             * we will decrement the Claimant Count for the claims via the
-             * Content Repository. We do not actually destroy the content
-             * because otherwise, we could remove the Original Claim and
-             * crash/restart before the FlowFileRepository is updated. This will
-             * result in the FlowFile being restored such that the content claim
-             * points to the Original Claim -- which has already been removed!
-             *
-             */
-            for (final StandardRepositoryRecord record : checkpoint.records.values()) {
-                if (record.isMarkedForDelete()) {
-                    // if the working claim is not the same as the original claim, we can immediately destroy the working claim
-                    // because it was created in this session and is to be deleted. We don't need to wait for the FlowFile Repo to sync.
-                    decrementClaimCount(record.getWorkingClaim());
-
-                    if (record.getOriginalClaim() != null && !record.getOriginalClaim().equals(record.getWorkingClaim())) {
-                        // if working & original claim are same, don't remove twice; we only want to remove the original
-                        // if it's different from the working. Otherwise, we remove two claimant counts. This causes
-                        // an issue if we only updated the FlowFile attributes.
-                        decrementClaimCount(record.getOriginalClaim());
-                    }
-
-                    if (LOG.isInfoEnabled()) {
-                        final FlowFileRecord flowFile = record.getCurrent();
-                        final long flowFileLife = System.currentTimeMillis() - flowFile.getEntryDate();
-                        final Connectable connectable = context.getConnectable();
-                        final Object terminator = connectable instanceof ProcessorNode ? ((ProcessorNode) connectable).getProcessor() : connectable;
-                        LOG.info("{} terminated by {}; life of FlowFile = {} ms", new Object[]{flowFile, terminator, flowFileLife});
-                    }
-                } else if (record.isWorking() && record.getWorkingClaim() != record.getOriginalClaim()) {
-                    // records which have been updated - remove original if exists
-                    decrementClaimCount(record.getOriginalClaim());
-                }
-            }
-
-            final long claimRemovalFinishNanos = System.nanoTime();
-            final long claimRemovalNanos = claimRemovalFinishNanos - claimRemovalStart;
+            final long flowFileRepoUpdateStart = System.nanoTime();
+            final long updateProvenanceNanos = flowFileRepoUpdateStart - updateProvenanceStart;
 
             // Update the FlowFile Repository
             try {
@@ -413,7 +375,19 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
             }
 
             final long flowFileRepoUpdateFinishNanos = System.nanoTime();
-            final long flowFileRepoUpdateNanos = flowFileRepoUpdateFinishNanos - claimRemovalFinishNanos;
+            final long flowFileRepoUpdateNanos = flowFileRepoUpdateFinishNanos - flowFileRepoUpdateStart;
+
+            if (LOG.isInfoEnabled()) {
+                for (final RepositoryRecord record : checkpoint.records.values()) {
+                    if (record.isMarkedForAbort()) {
+                        final FlowFileRecord flowFile = record.getCurrent();
+                        final long flowFileLife = System.currentTimeMillis() - flowFile.getEntryDate();
+                        final Connectable connectable = context.getConnectable();
+                        final Object terminator = connectable instanceof ProcessorNode ? ((ProcessorNode) connectable).getProcessor() : connectable;
+                        LOG.info("{} terminated by {}; life of FlowFile = {} ms", new Object[]{flowFile, terminator, flowFileLife});
+                    }
+                }
+            }
 
             updateEventRepository(checkpoint);
 
@@ -477,8 +451,6 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
                 formatNanos(commitNanos, timingInfo);
                 timingInfo.append("; FlowFile Repository Update took ");
                 formatNanos(flowFileRepoUpdateNanos, timingInfo);
-                timingInfo.append("; Claim Removal took ");
-                formatNanos(claimRemovalNanos, timingInfo);
                 timingInfo.append("; FlowFile Event Update took ");
                 formatNanos(updateEventRepositoryNanos, timingInfo);
                 timingInfo.append("; Enqueuing FlowFiles took ");
@@ -1007,12 +979,6 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
         for (final StandardRepositoryRecord record : recordsToHandle) {
             if (record.isMarkedForAbort()) {
                 decrementClaimCount(record.getWorkingClaim());
-                if (record.getCurrentClaim() != null && !record.getCurrentClaim().equals(record.getWorkingClaim())) {
-                    // if working & original claim are same, don't remove twice; we only want to remove the original
-                    // if it's different from the working. Otherwise, we remove two claimant counts. This causes
-                    // an issue if we only updated the flowfile attributes.
-                    decrementClaimCount(record.getCurrentClaim());
-                }
                 abortedRecords.add(record);
             } else {
                 transferRecords.add(record);
@@ -1489,7 +1455,18 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
 
     private void registerDequeuedRecord(final FlowFileRecord flowFile, final Connection connection) {
         final StandardRepositoryRecord record = new StandardRepositoryRecord(connection.getFlowFileQueue(), flowFile);
-        records.put(flowFile.getId(), record);
+
+        // Ensure that the checkpoint does not have a FlowFile with the same ID already. This should not occur,
+        // but this is a safety check just to make sure, because if it were to occur, and we did process the FlowFile,
+        // we would have a lot of problems, since the map is keyed off of the FlowFile ID.
+        if (this.checkpoint != null) {
+            final StandardRepositoryRecord checkpointedRecord = this.checkpoint.getRecord(flowFile);
+            handleConflictingId(flowFile, connection, checkpointedRecord);
+        }
+
+        final StandardRepositoryRecord existingRecord = records.putIfAbsent(flowFile.getId(), record);
+        handleConflictingId(flowFile, connection, existingRecord); // Ensure that we have no conflicts
+
         flowFilesIn++;
         contentSizeIn += flowFile.getSize();
 
@@ -1501,6 +1478,21 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
         set.add(flowFile);
 
         incrementConnectionOutputCounts(connection, flowFile);
+    }
+
+    private void handleConflictingId(final FlowFileRecord flowFile, final Connection connection, final StandardRepositoryRecord conflict) {
+        if (conflict == null) {
+            // No conflict
+            return;
+        }
+
+        LOG.error("Attempted to pull {} from {} but the Session already has a FlowFile with the same ID ({}): {}, which was pulled from {}. This means that the system has two FlowFiles with the" +
+            " same ID, which should not happen.", flowFile, connection, flowFile.getId(), conflict.getCurrent(), conflict.getOriginalQueue());
+        connection.getFlowFileQueue().put(flowFile);
+
+        rollback(true, false);
+        throw new FlowFileAccessException("Attempted to pull a FlowFile with ID " + flowFile.getId() + " from Connection "
+            + connection + " but a FlowFile with that ID already exists in the session");
     }
 
     @Override
@@ -2075,7 +2067,6 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
             record.markForDelete();
             expiredRecords.add(record);
             expiredReporter.expire(flowFile, "Expiration Threshold = " + connection.getFlowFileQueue().getFlowFileExpiration());
-            decrementClaimCount(flowFile.getContentClaim());
 
             final long flowFileLife = System.currentTimeMillis() - flowFile.getEntryDate();
             final Object terminator = connectable instanceof ProcessorNode ? ((ProcessorNode) connectable).getProcessor() : connectable;
@@ -2146,8 +2137,8 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
             // callback for reading FlowFile 1 and if we used the same stream we'd be destroying the ability to read from FlowFile 1.
             if (allowCachingOfStream && readRecursionSet.isEmpty() && writeRecursionSet.isEmpty()) {
                 if (currentReadClaim == claim) {
-                    if (currentReadClaimStream != null && currentReadClaimStream.getBytesConsumed() <= offset) {
-                        final long bytesToSkip = offset - currentReadClaimStream.getBytesConsumed();
+                    if (currentReadClaimStream != null && currentReadClaimStream.getCurrentOffset() <= offset) {
+                        final long bytesToSkip = offset - currentReadClaimStream.getCurrentOffset();
                         if (bytesToSkip > 0) {
                             StreamUtils.skip(currentReadClaimStream, bytesToSkip);
                         }
@@ -2157,36 +2148,22 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
                 }
 
                 claimCache.flush(claim);
-                final InputStream rawInStream = context.getContentRepository().read(claim);
 
                 if (currentReadClaimStream != null) {
                     currentReadClaimStream.close();
                 }
 
                 currentReadClaim = claim;
-
-                currentReadClaimStream = new ByteCountingInputStream(rawInStream);
-                StreamUtils.skip(currentReadClaimStream, offset);
+                currentReadClaimStream = new ContentClaimInputStream(context.getContentRepository(), claim, offset);
 
                 // Use a non-closeable stream because we want to keep it open after the callback has finished so that we can
                 // reuse the same InputStream for the next FlowFile
                 final InputStream disableOnClose = new DisableOnCloseInputStream(currentReadClaimStream);
-
                 return disableOnClose;
             } else {
                 claimCache.flush(claim);
-                final InputStream rawInStream = context.getContentRepository().read(claim);
-                try {
-                    StreamUtils.skip(rawInStream, offset);
-                } catch(IOException ioe) {
-                    try {
-                        rawInStream.close();
-                    } catch (final Exception e) {
-                        ioe.addSuppressed(ioe);
-                    }
 
-                    throw ioe;
-                }
+                final InputStream rawInStream = new ContentClaimInputStream(context.getContentRepository(), claim, offset);
                 return rawInStream;
             }
         } catch (final ContentNotFoundException cnfe) {
@@ -2267,7 +2244,9 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
         final StandardRepositoryRecord record = getRecord(source);
 
         try {
-            ensureNotAppending(record.getCurrentClaim());
+            final ContentClaim currentClaim = record.getCurrentClaim();
+            ensureNotAppending(currentClaim);
+            claimCache.flush(currentClaim);
         } catch (final IOException e) {
             throw new FlowFileAccessException("Failed to access ContentClaim for " + source.toString(), e);
         }

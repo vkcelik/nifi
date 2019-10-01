@@ -19,10 +19,12 @@ package org.apache.nifi.controller.tasks;
 import org.apache.nifi.components.state.StateManager;
 import org.apache.nifi.connectable.Connectable;
 import org.apache.nifi.connectable.ConnectableType;
+import org.apache.nifi.connectable.Connection;
 import org.apache.nifi.controller.FlowController;
 import org.apache.nifi.controller.ProcessorNode;
 import org.apache.nifi.controller.ScheduledState;
 import org.apache.nifi.controller.lifecycle.TaskTerminationAwareStateManager;
+import org.apache.nifi.controller.queue.FlowFileQueue;
 import org.apache.nifi.controller.repository.ActiveProcessSessionFactory;
 import org.apache.nifi.controller.repository.BatchingSessionFactory;
 import org.apache.nifi.controller.repository.RepositoryContext;
@@ -80,7 +82,7 @@ public class ConnectableTask {
 
         final StateManager stateManager = new TaskTerminationAwareStateManager(flowController.getStateManagerProvider().getStateManager(connectable.getIdentifier()), scheduleState::isTerminated);
         if (connectable instanceof ProcessorNode) {
-            processContext = new StandardProcessContext((ProcessorNode) connectable, flowController, encryptor, stateManager, scheduleState::isTerminated);
+            processContext = new StandardProcessContext((ProcessorNode) connectable, flowController.getControllerServiceProvider(), encryptor, stateManager, scheduleState::isTerminated);
         } else {
             processContext = new ConnectableProcessContext(connectable, encryptor, stateManager);
         }
@@ -142,11 +144,13 @@ public class ConnectableTask {
     private boolean isBackPressureEngaged() {
         return connectable.getIncomingConnections().stream()
             .filter(con -> con.getSource() == connectable)
-            .map(con -> con.getFlowFileQueue())
-            .anyMatch(queue -> queue.isFull());
+            .map(Connection::getFlowFileQueue)
+            .anyMatch(FlowFileQueue::isFull);
     }
 
     public InvocationResult invoke() {
+        logger.trace("Triggering {}", connectable);
+
         if (scheduleState.isTerminated()) {
             return InvocationResult.DO_NOT_YIELD;
         }
@@ -163,12 +167,14 @@ public class ConnectableTask {
 
         // Make sure processor has work to do.
         if (!isWorkToDo()) {
+            logger.debug("Yielding {} because it has no work to do", connectable);
             return InvocationResult.yield("No work to do");
         }
 
         if (numRelationships > 0) {
             final int requiredNumberOfAvailableRelationships = connectable.isTriggerWhenAnyDestinationAvailable() ? 1 : numRelationships;
             if (!repositoryContext.isRelationshipAvailabilitySatisfied(requiredNumberOfAvailableRelationships)) {
+                logger.debug("Yielding {} because Backpressure is Applied", connectable);
                 return InvocationResult.yield("Backpressure Applied");
             }
         }
@@ -197,7 +203,7 @@ public class ConnectableTask {
 
         final String originalThreadName = Thread.currentThread().getName();
         try {
-            try (final AutoCloseable ncl = NarCloseable.withComponentNarLoader(connectable.getRunnableComponent().getClass(), connectable.getIdentifier())) {
+            try (final AutoCloseable ncl = NarCloseable.withComponentNarLoader(flowController.getExtensionManager(), connectable.getRunnableComponent().getClass(), connectable.getIdentifier())) {
                 boolean shouldRun = connectable.getScheduledState() == ScheduledState.RUNNING;
                 while (shouldRun) {
                     connectable.onTrigger(processContext, activeSessionFactory);

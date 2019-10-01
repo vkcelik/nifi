@@ -26,8 +26,6 @@ import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.ProcessSessionFactory;
 import org.apache.nifi.processors.standard.MergeContent;
 import org.apache.nifi.processors.standard.MergeRecord;
-import org.apache.nifi.schema.access.SchemaNotFoundException;
-import org.apache.nifi.serialization.MalformedRecordException;
 import org.apache.nifi.serialization.RecordReader;
 
 import java.io.IOException;
@@ -109,12 +107,9 @@ public class RecordBinManager {
      * @param block if another thread is already writing to the desired bin, passing <code>true</code> for this parameter will block until the other thread(s) have finished so
      *            that the records can still be added to the desired bin. Passing <code>false</code> will result in moving on to another bin.
      *
-     * @throws SchemaNotFoundException if unable to find the schema for the record writer
-     * @throws MalformedRecordException if unable to read a record
      * @throws IOException if there is an IO problem reading from the stream or writing to the stream
      */
-    public void add(final String groupIdentifier, final FlowFile flowFile, final RecordReader reader, final ProcessSession session, final boolean block)
-        throws IOException, MalformedRecordException, SchemaNotFoundException {
+    public void add(final String groupIdentifier, final FlowFile flowFile, final RecordReader reader, final ProcessSession session, final boolean block) throws IOException {
 
         final List<RecordBin> currentBins;
         lock.lock();
@@ -194,17 +189,17 @@ public class RecordBinManager {
 
         final PropertyValue maxMillisValue = context.getProperty(MergeRecord.MAX_BIN_AGE);
         final String maxBinAge = maxMillisValue.getValue();
-        final long maxBinMillis = maxMillisValue.isSet() ? maxMillisValue.asTimePeriod(TimeUnit.MILLISECONDS).longValue() : Long.MAX_VALUE;
+        final long maxBinMillis = maxMillisValue.isSet() ? maxMillisValue.asTimePeriod(TimeUnit.MILLISECONDS) : Long.MAX_VALUE;
 
-        final String recordCountAttribute;
+        final String fragmentCountAttribute;
         final String mergeStrategy = context.getProperty(MergeRecord.MERGE_STRATEGY).getValue();
         if (MergeRecord.MERGE_STRATEGY_DEFRAGMENT.getValue().equals(mergeStrategy)) {
-            recordCountAttribute = MergeContent.FRAGMENT_COUNT_ATTRIBUTE;
+            fragmentCountAttribute = MergeContent.FRAGMENT_COUNT_ATTRIBUTE;
         } else {
-            recordCountAttribute = null;
+            fragmentCountAttribute = null;
         }
 
-        return new RecordBinThresholds(minRecords, maxRecords, minBytes, maxBytes, maxBinMillis, maxBinAge, recordCountAttribute);
+        return new RecordBinThresholds(minRecords, maxRecords, minBytes, maxBytes, maxBinMillis, maxBinAge, fragmentCountAttribute);
     }
 
 
@@ -244,7 +239,7 @@ public class RecordBinManager {
     }
 
     public int completeFullEnoughBins() throws IOException {
-        return handleCompletedBins(bin -> bin.isFullEnough());
+        return handleCompletedBins(RecordBin::isFullEnough);
     }
 
     private int handleCompletedBins(final Predicate<RecordBin> completionTest) throws IOException {

@@ -141,6 +141,10 @@ public abstract class AbstractFlowFileQueue implements FlowFileQueue {
 
     @Override
     public boolean isFull() {
+        return isFull(size());
+    }
+
+    protected boolean isFull(final QueueSize queueSize) {
         final MaxQueueSize maxSize = getMaxQueueSize();
 
         // Check if max size is set
@@ -148,7 +152,6 @@ public abstract class AbstractFlowFileQueue implements FlowFileQueue {
             return false;
         }
 
-        final QueueSize queueSize = size();
         if (maxSize.getMaxCount() > 0 && queueSize.getObjectCount() >= maxSize.getMaxCount()) {
             return true;
         }
@@ -187,7 +190,6 @@ public abstract class AbstractFlowFileQueue implements FlowFileQueue {
             @Override
             public void run() {
                 int position = 0;
-                int resultCount = 0;
                 final List<FlowFileSummary> summaries = new ArrayList<>();
 
                 // Create an ArrayList that contains all of the contents of the active queue.
@@ -213,7 +215,7 @@ public abstract class AbstractFlowFileQueue implements FlowFileQueue {
                     }
                 }
 
-                logger.debug("{} Finished listing FlowFiles for active queue with a total of {} results", this, resultCount);
+                logger.debug("{} Finished listing FlowFiles for active queue with a total of {} results out of {} FlowFiles", this, summaries.size(), allFlowFiles.size());
                 listRequest.setFlowFileSummaries(summaries);
                 listRequest.setState(ListFlowFileState.COMPLETE);
             }
@@ -323,7 +325,7 @@ public abstract class AbstractFlowFileQueue implements FlowFileQueue {
     }
 
 
-    protected FlowFileSummary summarize(final FlowFile flowFile, final int position) {
+    protected FlowFileSummary summarize(final FlowFileRecord flowFile, final int position) {
         // extract all of the information that we care about into new variables rather than just
         // wrapping the FlowFile object with a FlowFileSummary object. We do this because we want to
         // be able to hold many FlowFileSummary objects in memory and if we just wrap the FlowFile object,
@@ -335,6 +337,7 @@ public abstract class AbstractFlowFileQueue implements FlowFileQueue {
         final Long lastQueuedTime = flowFile.getLastQueueDate();
         final long lineageStart = flowFile.getLineageStartDate();
         final boolean penalized = flowFile.isPenalized();
+        final long penaltyExpires = flowFile.getPenaltyExpirationMillis();
 
         return new FlowFileSummary() {
             @Override
@@ -371,6 +374,11 @@ public abstract class AbstractFlowFileQueue implements FlowFileQueue {
             public boolean isPenalized() {
                 return penalized;
             }
+
+            @Override
+            public long getPenaltyExpirationMillis() {
+                return penaltyExpires;
+            }
         };
     }
 
@@ -378,25 +386,11 @@ public abstract class AbstractFlowFileQueue implements FlowFileQueue {
         // Create a Provenance Event and a FlowFile Repository record for each FlowFile
         final List<ProvenanceEventRecord> provenanceEvents = new ArrayList<>(flowFiles.size());
         final List<RepositoryRecord> flowFileRepoRecords = new ArrayList<>(flowFiles.size());
+        long dropContentSize = 0L;
         for (final FlowFileRecord flowFile : flowFiles) {
             provenanceEvents.add(createDropProvenanceEvent(flowFile, requestor));
             flowFileRepoRecords.add(createDeleteRepositoryRecord(flowFile));
-        }
-
-        long dropContentSize = 0L;
-        for (final FlowFileRecord flowFile : flowFiles) {
             dropContentSize += flowFile.getSize();
-            final ContentClaim contentClaim = flowFile.getContentClaim();
-            if (contentClaim == null) {
-                continue;
-            }
-
-            final ResourceClaim resourceClaim = contentClaim.getResourceClaim();
-            if (resourceClaim == null) {
-                continue;
-            }
-
-            resourceClaimManager.decrementClaimantCount(resourceClaim);
         }
 
         provRepository.registerEvents(provenanceEvents);

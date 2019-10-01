@@ -16,22 +16,13 @@
  */
 package org.apache.nifi.jms.processors;
 
-import java.io.StringWriter;
-import java.nio.charset.Charset;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Set;
-
-import javax.jms.Destination;
-import javax.jms.Message;
-
 import org.apache.commons.io.IOUtils;
-import org.apache.nifi.annotation.behavior.SystemResourceConsideration;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
 import org.apache.nifi.annotation.behavior.ReadsAttribute;
 import org.apache.nifi.annotation.behavior.ReadsAttributes;
 import org.apache.nifi.annotation.behavior.SystemResource;
+import org.apache.nifi.annotation.behavior.SystemResourceConsideration;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
@@ -46,6 +37,14 @@ import org.apache.nifi.stream.io.StreamUtils;
 import org.springframework.jms.connection.CachingConnectionFactory;
 import org.springframework.jms.core.JmsTemplate;
 import org.springframework.jms.support.JmsHeaders;
+
+import javax.jms.Destination;
+import javax.jms.Message;
+import java.io.StringWriter;
+import java.nio.charset.Charset;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * An implementation of JMS Message publishing {@link Processor} which upon each
@@ -124,11 +123,21 @@ public class PublishJMS extends AbstractJMSProcessor<JMSPublisher> {
                 String charset = context.getProperty(CHARSET).evaluateAttributeExpressions(flowFile).getValue();
                 switch (context.getProperty(MESSAGE_BODY).getValue()) {
                     case TEXT_MESSAGE:
-                        publisher.publish(destinationName, this.extractTextMessageBody(flowFile, processSession, charset), flowFile.getAttributes());
+                        try {
+                            publisher.publish(destinationName, this.extractTextMessageBody(flowFile, processSession, charset), flowFile.getAttributes());
+                        } catch(Exception e) {
+                            publisher.setValid(false);
+                            throw e;
+                        }
                         break;
                     case BYTES_MESSAGE:
                     default:
-                        publisher.publish(destinationName, this.extractMessageBody(flowFile, processSession), flowFile.getAttributes());
+                        try {
+                            publisher.publish(destinationName, this.extractMessageBody(flowFile, processSession), flowFile.getAttributes());
+                        } catch(Exception e) {
+                            publisher.setValid(false);
+                            throw e;
+                        }
                         break;
                 }
                 processSession.transfer(flowFile, REL_SUCCESS);
@@ -137,6 +146,7 @@ public class PublishJMS extends AbstractJMSProcessor<JMSPublisher> {
                 processSession.transfer(flowFile, REL_FAILURE);
                 this.getLogger().error("Failed while sending message to JMS via " + publisher, e);
                 context.yield();
+                publisher.setValid(false);
             }
         }
     }

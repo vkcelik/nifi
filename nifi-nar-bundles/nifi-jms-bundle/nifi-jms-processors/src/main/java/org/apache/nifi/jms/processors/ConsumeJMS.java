@@ -16,17 +16,6 @@
  */
 package org.apache.nifi.jms.processors;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Set;
-
-import javax.jms.Session;
-
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
 import org.apache.nifi.annotation.behavior.WritesAttribute;
@@ -49,6 +38,17 @@ import org.apache.nifi.processor.util.StandardValidators;
 import org.springframework.jms.connection.CachingConnectionFactory;
 import org.springframework.jms.core.JmsTemplate;
 import org.springframework.jms.support.JmsHeaders;
+
+import javax.jms.Session;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Consuming JMS processor which upon each invocation of
@@ -129,6 +129,14 @@ public class ConsumeJMS extends AbstractJMSProcessor<JMSConsumer> {
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .expressionLanguageSupported(ExpressionLanguageScope.VARIABLE_REGISTRY)
             .build();
+    static final PropertyDescriptor TIMEOUT = new PropertyDescriptor.Builder()
+            .name("Timeout")
+            .description("How long to wait to consume a message from the remote broker before giving up.")
+            .required(true)
+            .addValidator(StandardValidators.TIME_PERIOD_VALIDATOR)
+            .defaultValue("1 sec")
+            .expressionLanguageSupported(ExpressionLanguageScope.VARIABLE_REGISTRY)
+            .build();
 
     public static final Relationship REL_SUCCESS = new Relationship.Builder()
             .name("success")
@@ -155,6 +163,7 @@ public class ConsumeJMS extends AbstractJMSProcessor<JMSConsumer> {
         _propertyDescriptors.add(DURABLE_SUBSCRIBER);
         _propertyDescriptors.add(SHARED_SUBSCRIBER);
         _propertyDescriptors.add(SUBSCRIPTION_NAME);
+        _propertyDescriptors.add(TIMEOUT);
         thisPropertyDescriptors = Collections.unmodifiableList(_propertyDescriptors);
 
         Set<Relationship> _relationships = new HashSet<>();
@@ -179,28 +188,33 @@ public class ConsumeJMS extends AbstractJMSProcessor<JMSConsumer> {
         final String subscriptionName = context.getProperty(SUBSCRIPTION_NAME).evaluateAttributeExpressions().getValue();
         final String charset = context.getProperty(CHARSET).evaluateAttributeExpressions().getValue();
 
-        consumer.consume(destinationName, durable, shared, subscriptionName, charset, new ConsumerCallback() {
-            @Override
-            public void accept(final JMSResponse response) {
-                if (response == null) {
-                    return;
+        try {
+            consumer.consume(destinationName, durable, shared, subscriptionName, charset, new ConsumerCallback() {
+                @Override
+                public void accept(final JMSResponse response) {
+                    if (response == null) {
+                        return;
+                    }
+
+                    FlowFile flowFile = processSession.create();
+                    flowFile = processSession.write(flowFile, out -> out.write(response.getMessageBody()));
+
+                    final Map<String, String> jmsHeaders = response.getMessageHeaders();
+                    final Map<String, String> jmsProperties = response.getMessageProperties();
+
+                    flowFile = ConsumeJMS.this.updateFlowFileAttributesWithJMSAttributes(jmsHeaders, flowFile, processSession);
+                    flowFile = ConsumeJMS.this.updateFlowFileAttributesWithJMSAttributes(jmsProperties, flowFile, processSession);
+                    flowFile = processSession.putAttribute(flowFile, JMS_SOURCE_DESTINATION_NAME, destinationName);
+
+                    processSession.getProvenanceReporter().receive(flowFile, destinationName);
+                    processSession.transfer(flowFile, REL_SUCCESS);
+                    processSession.commit();
                 }
-
-                FlowFile flowFile = processSession.create();
-                flowFile = processSession.write(flowFile, out -> out.write(response.getMessageBody()));
-
-                final Map<String, String> jmsHeaders = response.getMessageHeaders();
-                final Map<String, String> jmsProperties = response.getMessageProperties();
-
-                flowFile = ConsumeJMS.this.updateFlowFileAttributesWithJMSAttributes(jmsHeaders, flowFile, processSession);
-                flowFile = ConsumeJMS.this.updateFlowFileAttributesWithJMSAttributes(jmsProperties, flowFile, processSession);
-                flowFile = processSession.putAttribute(flowFile, JMS_SOURCE_DESTINATION_NAME, destinationName);
-
-                processSession.getProvenanceReporter().receive(flowFile, destinationName);
-                processSession.transfer(flowFile, REL_SUCCESS);
-                processSession.commit();
-            }
-        });
+            });
+        } catch(Exception e) {
+            consumer.setValid(false);
+            throw e; // for backward compatibility with exception handling in flows
+        }
     }
 
     /**
@@ -210,6 +224,10 @@ public class ConsumeJMS extends AbstractJMSProcessor<JMSConsumer> {
     protected JMSConsumer finishBuildingJmsWorker(CachingConnectionFactory connectionFactory, JmsTemplate jmsTemplate, ProcessContext processContext) {
         int ackMode = processContext.getProperty(ACKNOWLEDGEMENT_MODE).asInteger();
         jmsTemplate.setSessionAcknowledgeMode(ackMode);
+
+        long timeout = processContext.getProperty(TIMEOUT).evaluateAttributeExpressions().asTimePeriod(TimeUnit.MILLISECONDS);
+        jmsTemplate.setReceiveTimeout(timeout);
+
         return new JMSConsumer(connectionFactory, jmsTemplate, this.getLogger());
     }
 
